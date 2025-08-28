@@ -191,15 +191,15 @@ for base_dir in scenario_dirs:
     final.dropna(subset=["UE_x","UE_y"], inplace=True)
     final.fillna(0, inplace=True)
     
-    # SINR 컬럼들 소수점 1자리로 반올림
+    # SINR 컬럼들 소수점 3자리로 반올림
     sinr_ma_cols = [f"{col}_ma" for col in sinr_cols]
     for col in sinr_ma_cols:
         if col in final.columns:
-            final[col] = final[col].round(1)
+            final[col] = final[col].round(3)
 
-    # UE 좌표 소수점 1자리로 반올림
-    final["UE_x"] = final["UE_x"].round(1)
-    final["UE_y"] = final["UE_y"].round(1)
+    # UE 좌표 소수점 3자리로 반올림
+    final["UE_x"] = final["UE_x"].round(3)
+    final["UE_y"] = final["UE_y"].round(3)
     final["relative_timestamp"] = final["relative_timestamp"] // 100
 
     # 🔥 시나리오별 개별 저장
