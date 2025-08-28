@@ -152,8 +152,6 @@ for base_dir in scenario_dirs:
         .map(lambda i: coords.get(i, (np.nan, np.nan)))
         .apply(pd.Series)
     )
-    df["serving_x"] = df["serving_x"].apply(lambda x: int(x) if pd.notna(x) else x)
-    df["serving_y"] = df["serving_y"].apply(lambda x: int(x) if pd.notna(x) else x)
 
     # Neighbor cells 좌표
     for i in range(1, 4):  # neighbor 1, 2, 3
