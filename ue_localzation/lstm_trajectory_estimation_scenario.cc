@@ -9,8 +9,8 @@
  * - Energy saving components removed
  * - Enhanced position tracking and logging
  * 
- * Copyright (c) 2024 Orange Innovation Poland
- * Copyright (c) 2024 Orange Innovation Egypt
+ * Copyright (c) 2025 WITLAB
+ * Copyright (c) 2025 WITLAB
  */
 #include "ns3/core-module.h"
 #include "ns3/network-module.h"
