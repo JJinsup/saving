@@ -13,59 +13,45 @@ from scipy.interpolate import interp1d
 import warnings
 warnings.filterwarnings("ignore")
 
+# 🔥 파일 관리 CONFIG 추가
+CONFIG = {
+    'actual_positions_file': 'ue_position_3gpp1.txt',
+    'predicted_positions_file': 'trajectory.txt',
+    'output_plot_file': 'ue_trajectory_comparison.png',
+    'plot_dpi': 300,
+    'figure_size': (24, 18),
+    'ues_per_plot': 7,
+    'max_ues': 28
+}
 
-
-def fast_trajectory_similarity(actual_traj, predicted_traj, num_points=50):
-    """
-    빠르고 정확한 궤적 유사도 평가
-    - 시간 무시, 순서만 고려
-    - 정규화된 길이로 리샘플링 후 비교
-    """
+def efficient_timestamp_similarity(actual_traj, predicted_traj):
+    """효율적인 타임스탬프 매칭 비교"""
+    
     if len(actual_traj) < 2 or len(predicted_traj) < 2:
         return None
     
     try:
-        # 1. 좌표만 추출 (시간 무시)
-        actual_points = actual_traj[['x', 'y']].values
-        pred_points = predicted_traj[['x', 'y']].values
+        # 1. 같은 타임스탬프끼리 매칭 (pandas merge 사용)
+        merged = pd.merge(
+            actual_traj[['timestamp', 'x', 'y']].rename(columns={'x': 'actual_x', 'y': 'actual_y'}),
+            predicted_traj[['timestamp', 'x', 'y']].rename(columns={'x': 'pred_x', 'y': 'pred_y'}),
+            on='timestamp',
+            how='inner'
+        )
         
-        # 2. 궤적 길이 정규화 (같은 개수 점으로 리샘플링)
-        def resample_trajectory(points, n_samples):
-            """궤적을 n_samples 개수로 균등하게 리샘플링"""
-            if len(points) <= n_samples:
-                return points
-            
-            # 0부터 len-1까지를 n_samples 개로 균등 분할
-            indices = np.linspace(0, len(points) - 1, n_samples)
-            resampled = []
-            
-            for idx in indices:
-                if idx == int(idx):  # 정수 인덱스
-                    resampled.append(points[int(idx)])
-                else:  # 보간 필요
-                    lower_idx = int(np.floor(idx))
-                    upper_idx = int(np.ceil(idx))
-                    weight = idx - lower_idx
-                    
-                    interpolated = (1 - weight) * points[lower_idx] + weight * points[upper_idx]
-                    resampled.append(interpolated)
-            
-            return np.array(resampled)
+        if len(merged) < 2:
+            return None
         
-        # 3. 두 궤적을 같은 길이로 리샘플링
-        actual_resampled = resample_trajectory(actual_points, num_points)
-        pred_resampled = resample_trajectory(pred_points, num_points)
+        # 2. 벡터화된 거리 계산
+        distances = np.sqrt((merged['actual_x'] - merged['pred_x'])**2 + 
+                           (merged['actual_y'] - merged['pred_y'])**2)
         
-        # 4. 벡터화된 거리 계산 (순서대로 1:1 매칭)
-        distances = np.sqrt(np.sum((actual_resampled - pred_resampled)**2, axis=1))
-        
-        # 5. 통계 계산
         return {
-            'avg_distance': np.mean(distances),
-            'max_distance': np.max(distances),
-            'std_distance': np.std(distances),
-            'median_distance': np.median(distances),
-            'trajectory_points': num_points
+            'avg_distance': distances.mean(),
+            'max_distance': distances.max(),
+            'std_distance': distances.std(),
+            'median_distance': distances.median(),
+            'matched_points': len(merged)
         }
         
     except Exception as e:
@@ -97,7 +83,7 @@ def analyze_trajectory_similarity_optimized(actual_df, predicted_df):
             continue
         
         # 🔥 빠른 유사도 계산
-        similarity = fast_trajectory_similarity(actual_traj, predicted_traj)
+        similarity = efficient_timestamp_similarity(actual_traj, predicted_traj)
         
         if similarity and 'error' not in similarity:
             similarity_results[ue_id] = similarity
@@ -160,11 +146,24 @@ def load_and_process_data():
     print("📊 Loading data...")
     
     # Actual positions (ue_position.txt)
-    actual_df = pd.read_csv('ue_position_3gpp1.txt')
+    actual_df = pd.read_csv(CONFIG['actual_positions_file'])
     print(f"✅ Actual positions: {actual_df.shape}")
     
+    # 🔥 절대 타임스탬프를 상대 타임스탬프로 변환
+    # 첫 번째 타임스탬프를 기준점으로 설정
+    first_timestamp = actual_df['timestamp'].min()
+    print(f"📅 First timestamp: {first_timestamp}")
+    
+    # 상대 타임스탬프 계산 (100ms 단위로 정규화)
+    actual_df['relative_timestamp'] = ((actual_df['timestamp'] - first_timestamp) / 100).astype(int)
+    
+    # 기존 timestamp를 relative_timestamp로 교체
+    actual_df = actual_df.drop(columns=['timestamp']).rename(columns={'relative_timestamp': 'timestamp'})
+    
+    print(f"📊 Converted timestamps: {actual_df['timestamp'].min()} - {actual_df['timestamp'].max()}")
+    
     # Predicted positions (lstm_trajectory.txt)
-    predicted_df = pd.read_csv('lstm_trajectory_3gpp1.txt')
+    predicted_df = pd.read_csv(CONFIG['predicted_positions_file'])
     print(f"✅ Predicted positions: {predicted_df.shape}")
     
     # Unify column names (imsi -> id)
@@ -224,30 +223,27 @@ def get_distinct_colors(n):
         return colors
 
 def plot_trajectories(actual_df, predicted_df):
-    """Plot actual vs predicted trajectory comparison with better colors"""
-    
-    actual_df, predicted_df = load_and_process_data()
-    
+    """Plot actual vs predicted trajectory comparison with better colors"""    
     # Select only common UE IDs
     common_ues = sorted(set(actual_df['id'].unique()) & set(predicted_df['id'].unique()))
-    total_ues = min(len(common_ues), 28)  # Max 28 UEs
+    total_ues = min(len(common_ues), CONFIG['max_ues'])  # CONFIG 사용
     common_ues = common_ues[:total_ues]
     
     print(f"🎯 Visualizing {total_ues} UE trajectory comparisons...")
     
     # 🔥 개선된 색상 설정
-    colors = get_distinct_colors(7)  # 7개씩 그룹이므로 7가지 색상
+    colors = get_distinct_colors(CONFIG['ues_per_plot'])  # CONFIG 사용
     
     # Create 2x2 subplots
-    fig, axes = plt.subplots(2, 2, figsize=(24, 18))
+    fig, axes = plt.subplots(2, 2, figsize=CONFIG['figure_size'])
     fig.suptitle('UE Trajectory Comparison: Actual vs Predicted', 
                  fontsize=20, fontweight='bold')
     
     axes = axes.flatten()
     
-    # Divide into 4 groups of 7 each
-    ues_per_plot = 7
-    
+    # Divide into 4 groups
+    ues_per_plot = CONFIG['ues_per_plot']    
+
     for plot_idx in range(4):
         ax = axes[plot_idx]
         
@@ -322,9 +318,9 @@ def plot_trajectories(actual_df, predicted_df):
         ax.legend(all_handles, all_labels, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
     
     plt.tight_layout()
-    plt.savefig('ue_trajectory_comparison.png', dpi=300, bbox_inches='tight')
+    plt.savefig(CONFIG['output_plot_file'], dpi=CONFIG['plot_dpi'], bbox_inches='tight')
     plt.show()
-    print("💾 Saved: ue_trajectory_comparison.png")
+    print(f"💾 Saved: {CONFIG['output_plot_file']}")
 
 def main():
     """Main execution"""
