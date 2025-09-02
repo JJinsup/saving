@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
+2025-09-02 수정 : 임진섭
 UE Trajectory Comparison Visualization: Actual vs Predicted Trajectories (Simple Version)
-- ue_position.txt: Actual positions 
-- lstm_trajectory.txt: Predicted positions
-- 색상 구분이 잘 되도록 개선
+- 타임스탬프 매칭 최적화
+- 벡터화된 거리 계산
+- MAE, MSE, RMSE 계산 추가
+- 전체 통계 출력 개선
 """
 
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.interpolate import interp1d
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -55,15 +56,12 @@ def efficient_timestamp_similarity(actual_traj, predicted_traj):
             'mae': mae,                    # 🔥 추가
             'mse': mse,                    # 🔥 추가
             'rmse': rmse,                  # 🔥 추가
-            'avg_distance': mae,           # 기존 호환성 유지
             'max_distance': distances.max(),
-            'std_distance': distances.std(),
-            'median_distance': distances.median(),
             'matched_points': len(merged)
         }
         
     except Exception as e:
-        return {'error': str(e), 'avg_distance': float('inf')}
+        return {'error': str(e), 'mae': float('inf')}
 
 def analyze_trajectory_similarity_optimized(actual_df, predicted_df):
     """최적화된 궤적 유사도 분석"""
@@ -140,18 +138,11 @@ def analyze_trajectory_similarity_optimized(actual_df, predicted_df):
         print(f"   MSE: {similarity_results[worst_ue]['mse']:.2f}")
         print(f"   RMSE: {similarity_results[worst_ue]['rmse']:.2f}m")
 
-def calculate_path_length(trajectory):
-    """궤적의 총 길이 계산"""
-    if len(trajectory) < 2:
-        return 0
-    
-    total_length = 0
-    for i in range(1, len(trajectory)):
-        dx = trajectory['x'].iloc[i] - trajectory['x'].iloc[i-1]
-        dy = trajectory['y'].iloc[i] - trajectory['y'].iloc[i-1]
-        total_length += np.sqrt(dx**2 + dy**2)
-    
-    return total_length
+        print("="*80)
+        return similarity_results  # 🔥 필수!
+    else:
+        print("❌ No valid similarity results")
+        return {}  # 🔥 필수!
 
 def load_and_process_data():
     """Load data and preprocess for trajectory generation"""
@@ -192,47 +183,9 @@ def load_and_process_data():
     return actual_df, predicted_df
 
 def get_distinct_colors(n):
-    """구분이 잘 되는 색상 생성"""
-    if n <= 7:
-        # 기본 7가지 뚜렷한 색상
-        colors = ['#FF0000', '#0000FF', '#00FF00', '#FF8000', '#8000FF', '#FF0080', '#00FFFF']
-        return colors[:n]
-    elif n <= 12:
-        # 12가지 색상 조합
-        colors = ['#FF0000', '#0000FF', '#00FF00', '#FF8000', '#8000FF', '#FF0080', 
-                 '#FFFF00', '#FF8080', '#8080FF', '#80FF80', '#FF8040', '#4080FF']
-        return colors[:n]
-    else:
-        # 많은 수를 위한 HSV 색상환
-        hues = np.linspace(0, 360, n, endpoint=False)
-        colors = []
-        for i, hue in enumerate(hues):
-            # 채도와 명도를 조절해서 구분이 잘 되도록
-            saturation = 0.8 if i % 2 == 0 else 1.0
-            value = 0.9 if i % 3 == 0 else 0.7
-            
-            # HSV to RGB 변환
-            h = hue / 60.0
-            c = value * saturation
-            x = c * (1 - abs((h % 2) - 1))
-            m = value - c
-            
-            if 0 <= h < 1:
-                r, g, b = c, x, 0
-            elif 1 <= h < 2:
-                r, g, b = x, c, 0
-            elif 2 <= h < 3:
-                r, g, b = 0, c, x
-            elif 3 <= h < 4:
-                r, g, b = 0, x, c
-            elif 4 <= h < 5:
-                r, g, b = x, 0, c
-            else:
-                r, g, b = c, 0, x
-            
-            colors.append(f'#{int((r+m)*255):02x}{int((g+m)*255):02x}{int((b+m)*255):02x}')
-        
-        return colors
+    """간소화된 색상 생성 (최대 7개만 사용)"""
+    colors = ['#FF0000', '#0000FF', '#00FF00', '#FF8000', '#8000FF', '#FF0080', '#00FFFF']
+    return colors[:n]  # HSV 변환 부분 전체 삭제 (어차피 7개만 사용)
 
 def plot_trajectories(actual_df, predicted_df):
     """Plot actual vs predicted trajectory comparison with better colors"""    
@@ -308,26 +261,6 @@ def plot_trajectories(actual_df, predicted_df):
         ax.grid(True, alpha=0.4, linewidth=1)
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=11)
         ax.set_aspect('equal', adjustable='box')
-        
-        # Add enhanced symbol legend
-        legend_elements = [
-            plt.Line2D([0], [0], marker='s', color='black', label='Start Point', 
-                      markersize=10, linestyle='None', markerfacecolor='lightgray', 
-                      markeredgewidth=2),
-            plt.Line2D([0], [0], marker='*', color='black', label='End Point', 
-                      markersize=12, linestyle='None', markerfacecolor='lightgray',
-                      markeredgewidth=2),
-            plt.Line2D([0], [0], marker='o', color='gray', label='Actual Points', 
-                       markersize=8, linestyle='None', markerfacecolor='white', markeredgewidth=2),
-            plt.Line2D([0], [0], marker='^', color='gray', label='Predicted Points', 
-                      markersize=8, linestyle='None', markerfacecolor='gray', markeredgewidth=2)
-        ]
-        
-        # Combine legends
-        handles, labels = ax.get_legend_handles_labels()
-        all_handles = handles + legend_elements
-        all_labels = labels + [elem.get_label() for elem in legend_elements]
-        ax.legend(all_handles, all_labels, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
     
     plt.tight_layout()
     plt.savefig(CONFIG['output_plot_file'], dpi=CONFIG['plot_dpi'], bbox_inches='tight')
