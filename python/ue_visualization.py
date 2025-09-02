@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 # 🔥 파일 관리 CONFIG 추가
 CONFIG = {
     'actual_positions_file': 'ue_position_3gpp1.txt',
-    'predicted_positions_file': 'trajectory.txt',
+    'predicted_positions_file': 'lstm_trajectory_3gpp1.txt',
     'output_plot_file': 'ue_trajectory_comparison.png',
     'plot_dpi': 300,
     'figure_size': (24, 18),
@@ -46,8 +46,16 @@ def efficient_timestamp_similarity(actual_traj, predicted_traj):
         distances = np.sqrt((merged['actual_x'] - merged['pred_x'])**2 + 
                            (merged['actual_y'] - merged['pred_y'])**2)
         
+        # 🔥 추가: MAE, MSE, RMSE 계산
+        mae = distances.mean()  # Mean Absolute Error
+        mse = (distances ** 2).mean()  # Mean Squared Error  
+        rmse = np.sqrt(mse)  # Root Mean Squared Error
+        
         return {
-            'avg_distance': distances.mean(),
+            'mae': mae,                    # 🔥 추가
+            'mse': mse,                    # 🔥 추가
+            'rmse': rmse,                  # 🔥 추가
+            'avg_distance': mae,           # 기존 호환성 유지
             'max_distance': distances.max(),
             'std_distance': distances.std(),
             'median_distance': distances.median(),
@@ -87,7 +95,7 @@ def analyze_trajectory_similarity_optimized(actual_df, predicted_df):
         
         if similarity and 'error' not in similarity:
             similarity_results[ue_id] = similarity
-            print(f"✅ Avg: {similarity['avg_distance']:.1f}m, Max: {similarity['max_distance']:.1f}m")
+            print(f"✅ MAE: {similarity['mae']:.1f}m, MSE: {similarity['mse']:.1f}, RMSE: {similarity['rmse']:.1f}m")
         else:
             print(f"❌ Error: {similarity.get('error', 'Unknown')}")
     
@@ -97,36 +105,40 @@ def analyze_trajectory_similarity_optimized(actual_df, predicted_df):
         print("📊 OVERALL STATISTICS")
         print("="*80)
         
-        all_avg_dist = [r['avg_distance'] for r in similarity_results.values()]
+        all_mae = [r['mae'] for r in similarity_results.values()]
+        all_mse = [r['mse'] for r in similarity_results.values()]
+        all_rmse = [r['rmse'] for r in similarity_results.values()]
         all_max_dist = [r['max_distance'] for r in similarity_results.values()]
-        all_std_dist = [r['std_distance'] for r in similarity_results.values()]
         
-        print(f"📊 Average Distance Error:")
-        print(f"   Mean: {np.mean(all_avg_dist):.2f}m ± {np.std(all_avg_dist):.2f}m")
-        print(f"   Range: {np.min(all_avg_dist):.2f}m - {np.max(all_avg_dist):.2f}m")
+        print(f"📊 MAE (Mean Absolute Error):")
+        print(f"   Mean: {np.mean(all_mae):.2f}m ± {np.std(all_mae):.2f}m")
+        print(f"   Range: {np.min(all_mae):.2f}m - {np.max(all_mae):.2f}m")
+        
+        print(f"📊 MSE (Mean Squared Error):")
+        print(f"   Mean: {np.mean(all_mse):.2f} ± {np.std(all_mse):.2f}")
+        print(f"   Range: {np.min(all_mse):.2f} - {np.max(all_mse):.2f}")
+        
+        print(f"📊 RMSE (Root Mean Squared Error):")
+        print(f"   Mean: {np.mean(all_rmse):.2f}m ± {np.std(all_rmse):.2f}m")
+        print(f"   Range: {np.min(all_rmse):.2f}m - {np.max(all_rmse):.2f}m")
         
         print(f"📊 Maximum Distance Error:")
         print(f"   Mean: {np.mean(all_max_dist):.2f}m ± {np.std(all_max_dist):.2f}m")
         print(f"   Range: {np.min(all_max_dist):.2f}m - {np.max(all_max_dist):.2f}m")
         
-        # 성능 순위
-        best_ue = min(similarity_results.keys(), key=lambda x: similarity_results[x]['avg_distance'])
-        worst_ue = max(similarity_results.keys(), key=lambda x: similarity_results[x]['avg_distance'])
+        # 성능 순위 (MAE 기준)
+        best_ue = min(similarity_results.keys(), key=lambda x: similarity_results[x]['mae'])
+        worst_ue = max(similarity_results.keys(), key=lambda x: similarity_results[x]['mae'])
         
         print(f"\n🏆 Best Performance:  UE {best_ue}")
-        print(f"   Avg: {similarity_results[best_ue]['avg_distance']:.2f}m")
-        print(f"   Max: {similarity_results[best_ue]['max_distance']:.2f}m")
+        print(f"   MAE: {similarity_results[best_ue]['mae']:.2f}m")
+        print(f"   MSE: {similarity_results[best_ue]['mse']:.2f}")
+        print(f"   RMSE: {similarity_results[best_ue]['rmse']:.2f}m")
         
         print(f"💥 Worst Performance: UE {worst_ue}")
-        print(f"   Avg: {similarity_results[worst_ue]['avg_distance']:.2f}m") 
-        print(f"   Max: {similarity_results[worst_ue]['max_distance']:.2f}m")
-        
-        print("="*80)
-        
-        return similarity_results
-    else:
-        print("❌ No valid similarity results")
-        return {}
+        print(f"   MAE: {similarity_results[worst_ue]['mae']:.2f}m")
+        print(f"   MSE: {similarity_results[worst_ue]['mse']:.2f}")
+        print(f"   RMSE: {similarity_results[worst_ue]['rmse']:.2f}m")
 
 def calculate_path_length(trajectory):
     """궤적의 총 길이 계산"""
