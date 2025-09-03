@@ -1,6 +1,7 @@
 /*
  * SINR Monitor xApp with 5-second Moving Average (Simulation Time)
  * 🔥 시뮬레이션 시간 기준 5초 간격 이동평균 처리
+ * 250903 limjs
  */
 
 #include "../../../../src/xApp/e42_xapp_api.h"
@@ -24,6 +25,9 @@
 // CONSTANTS & GLOBAL VARIABLES
 // =============================================================================
 #define WINDOW_SIZE 50
+#define NUM_CELLS 7
+#define MIN_NEIGHBORS_REQUIRED 3 // 최소 필요 neighbor 개수
+#define TOTAL_UES 28                             // 전체 UE 개수
 
 static int socket_fd = -1;
 static bool socket_connected = false;
@@ -33,9 +37,9 @@ static bool monitoring_active = true;
 static uint64_t const period_ms = 100;  
 static int indication_counter = 0;
 static FILE *log_file = NULL;
-#define MIN_VALID_SINR -30.0    // 최소 유효 SINR (dB)
-#define MAX_VALID_SINR 50.0     // 최대 유효 SINR (dB)
-#define MIN_NEIGHBORS_REQUIRED 3 // 최소 필요 neighbor 개수
+static uint64_t current_sequence_timestamp = 0;  // 0, 1,2
+static int current_burst_ue_count = 0;           // 현재 burst에서 받은 UE 개수
+static bool burst_sequence_assigned[TOTAL_UES + 1] = {false}; // UE별 sequence 할당 여부
 // =============================================================================
 // DATA STRUCTURES
 // =============================================================================
@@ -49,15 +53,14 @@ typedef struct {
 
 // Cell Position Mapping (ns-O-RAN 시뮬레이터 기준)
 static cell_position_t cell_positions[] = {
-    {2, 800.0, 800.0},         // gNB 1 중앙 위치
-    {3, 1200.0, 800.0},        // gNB 2 동쪽
-    {4, 1000.0, 1146.0},       // gNB 3 북동쪽
-    {5, 600.0, 1146.0},        // gNB 4 북서쪽
-    {6, 400.0, 800.0},         // gNB 5 서쪽
-    {7, 600.0, 453.0},         // gNB 6 남서쪽
-    {8, 1000.0, 453.0},        // gNB 7 남동쪽
+    {2, 800, 800},         // gNB 1 중앙 위치
+    {3, 1300, 800},        // gNB 2 동쪽
+    {4, 1050, 1233.01},       // gNB 3 북동쪽
+    {5, 550, 1233.01},        // gNB 4 북서쪽
+    {6, 300, 800},         // gNB 5 서쪽
+    {7, 550, 366.987},         // gNB 6 남서쪽
+    {8, 1050, 366.987},        // gNB 7 남동쪽
 };
-static size_t num_cells = sizeof(cell_positions) / sizeof(cell_position_t);
 
 // 🔥 이동평균을 위한 UE 데이터 버퍼
 typedef struct {
@@ -106,34 +109,49 @@ struct InfoObj {
 // =============================================================================
 // UTILITY FUNCTIONS
 // =============================================================================
+// UE별 sequence timestamp 저장
+static uint64_t ue_sequence_timestamps[TOTAL_UES + 1] = {0}; // UE ID는 1~28
+
+static uint64_t assign_sequence_timestamp(uint16_t ue_id) {
+    // 🔥 이미 현재 burst에서 sequence가 할당된 UE면 기존 값 반환
+    if (burst_sequence_assigned[ue_id]) {
+        return ue_sequence_timestamps[ue_id];
+    }
+    
+    // 🔥 새로운 UE면 현재 sequence timestamp 할당
+    ue_sequence_timestamps[ue_id] = current_sequence_timestamp;
+    burst_sequence_assigned[ue_id] = true;
+    current_burst_ue_count++;
+    
+    printf("📊 UE_%d assigned sequence: %lu ms (count: %d/%d)\n", 
+           ue_id, current_sequence_timestamp, current_burst_ue_count, TOTAL_UES);
+    
+    // 🔥 28개 UE가 모두 들어오면 다음 sequence로 준비
+    if (current_burst_ue_count >= TOTAL_UES) {
+        printf("✅ Burst complete! Moving to next sequence: %lu → %lu\n", 
+               current_sequence_timestamp, current_sequence_timestamp + 1);
+        
+        // 다음 burst 준비
+        current_sequence_timestamp += 1;
+        current_burst_ue_count = 0;
+        
+        // 모든 UE의 할당 상태 초기화
+        for (int i = 0; i <= TOTAL_UES; i++) {
+            burst_sequence_assigned[i] = false;
+        }
+    }
+    
+    return ue_sequence_timestamps[ue_id];
+}
 
 // Cell position 조회
 static cell_position_t* get_cell_position(uint16_t cellID) {
-    for (size_t i = 0; i < num_cells; i++) {
+    for (size_t i = 0; i < NUM_CELLS; i++) {
         if (cell_positions[i].cellID == cellID) {
             return &cell_positions[i];
         }
     }
     return NULL;
-}
-
-// 🔥 SINR 값 유효성 검사 함수 추가
-static bool is_valid_sinr(double sinr) {
-    return (sinr >= MIN_VALID_SINR && sinr <= MAX_VALID_SINR && !isnan(sinr));
-}
-
-// 🔥 이상치 제거 함수 추가
-static double filter_sinr_outlier(double new_sinr, double prev_sinr) {
-    if (!is_valid_sinr(new_sinr)) {
-        return is_valid_sinr(prev_sinr) ? prev_sinr : 0.0;
-    }
-    
-    // 급격한 변화 감지 (15dB 이상)
-    if (is_valid_sinr(prev_sinr) && fabs(new_sinr - prev_sinr) > 15.0) {
-        return prev_sinr + 0.1 * (new_sinr - prev_sinr);  // 평활화
-    }
-    
-    return new_sinr;
 }
 
 // UE 버퍼 찾기 또는 생성
@@ -189,19 +207,16 @@ static bool isMeasNameContains(const char* meas_name, const char* name) {
 // =============================================================================
 // 🔥 50개 샘플 이동평균 처리 함수들
 // =============================================================================
+
 // UE별 이동평균 계산 및 전송 (학습 데이터와 동일한 방식)
-static void check_and_send_ue_data(ue_buffer_t* ue_buf, uint64_t timestamp) {
-    if (ue_buf->history_count < WINDOW_SIZE) {
+static void check_and_send_ue_data(ue_buffer_t* ue_buf, uint64_t sequence_timestamp) {
+    
+    if (ue_buf->history_count < 5) {
         // 진행 상황 표시 (10개 단위)
         if (ue_buf->history_count % 10 == 0 || ue_buf->history_count <= 5) {
             printf("📊 UE_%d: Buffering... %d/%d samples collected\n", 
                    ue_buf->ueID, ue_buf->history_count, WINDOW_SIZE);
         }
-        return;
-    }
-        // 🔥 추가: 데이터 품질 사전 체크
-    if (!is_valid_sinr(ue_buf->measurement_history[(ue_buf->history_idx - 1 + WINDOW_SIZE) % WINDOW_SIZE].serving_sinr)) {
-        printf("⚠️  UE_%d: Invalid serving SINR, skipping transmission\n", ue_buf->ueID);
         return;
     }
     printf("🎯 UE_%d: Buffer ready! Starting sliding window transmission...\n", ue_buf->ueID);
@@ -223,17 +238,10 @@ static void check_and_send_ue_data(ue_buffer_t* ue_buf, uint64_t timestamp) {
         
         double sinr_val = ue_buf->measurement_history[read_idx].serving_sinr;
         // 🔥 추가: 유효성 검사
-        if (is_valid_sinr(sinr_val)) {
+        if (!isnan(sinr_val)) {
             serving_sinr_sum += sinr_val;
             valid_serving_count++;
         }
-    }
-    
-    // 🔥 추가: 유효한 샘플이 부족하면 전송 중단
-    if (valid_serving_count < window_size * 0.7) {  // 70% 이상 유효해야 함
-        printf("⚠️  UE_%d: Too few valid serving SINR samples (%d/%d), skipping\n", 
-               ue_buf->ueID, valid_serving_count, window_size);
-        return;
     }
     
     double serving_sinr_ma = serving_sinr_sum / valid_serving_count;
@@ -263,7 +271,7 @@ static void check_and_send_ue_data(ue_buffer_t* ue_buf, uint64_t timestamp) {
             uint16_t neighID = ue_buf->measurement_history[read_idx].neighbor_ids[j];
             double neighSINR = ue_buf->measurement_history[read_idx].neighbor_sinrs[j];
 
-            if (!is_valid_sinr(neighSINR) || neighID == 0) continue;
+            if (isnan(neighSINR) || neighID == 0) continue;
 
             // 기존 neighbor 찾기
             int found_idx = -1;
@@ -304,17 +312,25 @@ static void check_and_send_ue_data(ue_buffer_t* ue_buf, uint64_t timestamp) {
     }
     
     // Top 3 neighbor 선별
-    uint16_t top3_ids[3] = {0, 0, 0};
-    double top3_sinr[3] = {-50.0, -50.0, -50.0};  // 기본값을 낮은 값으로
+    double top3_sinr[3] = {0,0,0};  // 기본값을 낮은 값으로
     
     // 🔥 neighbor 선별 루프 수정
     int valid_neighbors_count = 0;
-    for (int i = 0; i < 3 && i < unique_neighbors; i++) {
-        // 🔥 추가 조건: 더 엄격한 기준
-        if (neighbor_avgs[i].avg_sinr > MIN_VALID_SINR && neighbor_avgs[i].count >= 5) {
-            top3_ids[i] = neighbor_avgs[i].cellID;
-            top3_sinr[i] = neighbor_avgs[i].avg_sinr;
+    for (int i = 0; i < unique_neighbors; i++) {
+        // 🔥 추가: serving cell과 동일한 neighbor 제외
+        if (neighbor_avgs[i].cellID == ue_buf->servingCellID) {
+            printf("⚠️  UE_%d: Skipping neighbor cell %d (same as serving cell)\n", 
+                ue_buf->ueID, neighbor_avgs[i].cellID);
+            continue;  // serving cell과 같으면 건너뛰기
+        }
+        
+        // 기존 조건들
+        if (neighbor_avgs[i].count >= 5) {
+            top3_sinr[valid_neighbors_count] = neighbor_avgs[i].avg_sinr;
             valid_neighbors_count++;
+            
+            // 3개 채우면 종료
+            if (valid_neighbors_count >= 3) break;
         }
     }
     
@@ -331,16 +347,15 @@ static void check_and_send_ue_data(ue_buffer_t* ue_buf, uint64_t timestamp) {
     // 🔥 학습 데이터와 동일한 CSV 형태로 출력
     char line[512];
     snprintf(line, sizeof(line),
-        "%lu,%d,%d,%.6f,%d,%.6f,%d,%.6f,%d,%.6f,%.1f,%.1f\n",
-        timestamp / 1000000,  // relative_timestamp (ms)
-        ue_buf->ueID,      // ueImsiComplete
-        ue_buf->servingCellID,  // L3 serving Id(m_cellId)
-        serving_sinr_ma,   // L3 serving SINR_ma (슬라이딩 윈도우 평균!)
-        top3_ids[0], top3_sinr[0],  // L3 neigh Id 1, L3 neigh SINR 1_ma
-        top3_ids[1], top3_sinr[1],  // L3 neigh Id 2, L3 neigh SINR 2_ma  
-        top3_ids[2], top3_sinr[2],  // L3 neigh Id 3, L3 neigh SINR 3_ma
-        serving_pos ? serving_pos->x : 0.0,  // gNB_x
-        serving_pos ? serving_pos->y : 0.0   // gNB_y
+        "%lu,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+        sequence_timestamp,  // relative_timestamp (ms)
+        ue_buf->ueID,         // imsi
+        serving_pos ? (double)serving_pos->x : 0.0,  // serving_x (소수점 3자리)
+        serving_pos ? (double)serving_pos->y : 0.0,  // serving_y (소수점 3자리)
+        serving_sinr_ma,      // L3 serving SINR 3gpp_ma (소수점 3자리)
+        top3_sinr[0],        // L3 neigh SINR 3gpp 1 (소수점 3자리)
+        top3_sinr[1],        // L3 neigh SINR 3gpp 2 (소수점 3자리)
+        top3_sinr[2]         // L3 neigh SINR 3gpp 3 (소수점 3자리)
     );
     
     // 파일 및 소켓 전송
@@ -369,25 +384,15 @@ static void check_and_send_ue_data(ue_buffer_t* ue_buf, uint64_t timestamp) {
 
 // UE별 serving SINR 샘플 추가
 static void add_serving_sample(ue_buffer_t* ue_buf, uint16_t cellID, double sinr, uint64_t timestamp) {
-        // 🔥 추가: 이전 SINR 값 가져오기
-    double prev_sinr = 0.0;
-    if (ue_buf->history_count > 0) {
-        int prev_idx = (ue_buf->history_idx - 1 + WINDOW_SIZE) % WINDOW_SIZE;
-        prev_sinr = ue_buf->measurement_history[prev_idx].serving_sinr;
-    }
-    
-    // 🔥 추가: 이상치 필터링
-    double filtered_sinr = filter_sinr_outlier(sinr, prev_sinr);
-    if (fabs(filtered_sinr - sinr) > 0.1) {
-        printf("🔍 UE_%d: SINR filtered %.1f → %.1f dB\n", ue_buf->ueID, sinr, filtered_sinr);
-    }
+    // 🔥 1. 먼저 sequence timestamp 할당
+    uint64_t sequence_timestamp = assign_sequence_timestamp(ue_buf->ueID);
     
     ue_buf->servingCellID = cellID;
-    ue_buf->last_timestamp = timestamp;
+    ue_buf->last_timestamp = timestamp;  // 원본은 last_timestamp에만 저장
     
-    // 🔥 수정: 필터링된 값 사용
-    ue_buf->measurement_history[ue_buf->history_idx].serving_sinr = filtered_sinr;  // 기존: sinr
-    ue_buf->measurement_history[ue_buf->history_idx].timestamp = timestamp;
+    // 🔥 4. sequence_timestamp를 measurement_history에 저장
+    ue_buf->measurement_history[ue_buf->history_idx].serving_sinr = sinr;
+    ue_buf->measurement_history[ue_buf->history_idx].timestamp = sequence_timestamp; // ✅ sequence 사용
     ue_buf->measurement_history[ue_buf->history_idx].active_neighbor_count = 0;
     
     // Circular index 업데이트
@@ -396,16 +401,20 @@ static void add_serving_sample(ue_buffer_t* ue_buf, uint16_t cellID, double sinr
         ue_buf->history_count++;
     }
     
-    // 🔥 매번 이동평균 계산 및 전송
-    check_and_send_ue_data(ue_buf, timestamp);
+    // 🔥 5. sequence_timestamp를 check_and_send_ue_data에 전달
+    check_and_send_ue_data(ue_buf, sequence_timestamp); // ✅ sequence 사용
 }
 
-// UE별 neighbor SINR 샘플 추가  
+// UE별 neighbor SINR 샘플 추가   🔥 추가: neighbor 데이터 수집 시에도 serving cell 체크
 static void add_neighbor_sample(ue_buffer_t* ue_buf, uint16_t neighCellID, double sinr) {
-    // 🔥 현재 측정값의 neighbor 정보에 추가
+    // serving cell과 같은 neighbor는 무시
+    if (neighCellID == ue_buf->servingCellID) {
+        return;  // serving cell과 같으면 추가하지 않음
+    }
+    
+    // 기존 로직 계속...
     int current_idx = (ue_buf->history_idx - 1 + WINDOW_SIZE) % WINDOW_SIZE;
     
-    // neighbor 배열에 추가 (기존 로직 유지하되 history에 저장)
     if (ue_buf->measurement_history[current_idx].active_neighbor_count < 10) {
         int n_idx = ue_buf->measurement_history[current_idx].active_neighbor_count;
         ue_buf->measurement_history[current_idx].neighbor_ids[n_idx] = neighCellID;
@@ -613,8 +622,7 @@ static void sm_cb_kpm(sm_ag_if_rd_t const* rd) {
         // CSV 헤더 출력 (첫 번째 indication에서만)
         if (indication_counter == 0) {
             if (log_file) {
-                fprintf(log_file, "relative_timestamp,ueImsiComplete,L3 serving Id(m_cellId),L3 serving SINR_ma,L3 neigh Id 1 (cellId),L3 neigh SINR 1_ma,L3 neigh Id 2 (cellId),L3 neigh SINR 2_ma,L3 neigh Id 3 (cellId),L3 neigh SINR 3_ma,gNB_x,gNB_y\n"
-);
+                fprintf(log_file, "relative_timestamp,imsi,serving_x,serving_y,L3 serving SINR 3gpp_ma,L3 neigh SINR 3gpp 1 (convertedSinr)_ma,L3 neigh SINR 3gpp 2 (convertedSinr)_ma,L3 neigh SINR 3gpp 3 (convertedSinr)_ma\n");
                 fflush(log_file);
             }
             printf("📋 CSV header written\n");
@@ -700,7 +708,7 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, signal_handler);
 
     // CSV 로그 파일 열기
-    log_file = fopen("sinr_5sec_moving_average.csv", "w");
+    log_file = fopen("input_data_250829.csv", "w");
     if (log_file == NULL) {
         printf("⚠️  Failed to open log file\n");
     }
