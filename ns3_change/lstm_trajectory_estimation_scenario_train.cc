@@ -534,7 +534,7 @@ main(int argc, char *argv[]) {
     enbmobility.SetPositionAllocator(enbPositionAlloc);
     enbmobility.Install(allEnbNodes);
 
-    // 모빌리티 설치 직전에만 (298줄 근처)
+    // 모빌리티 설치 직전에만
     NS_LOG_UNCOND("Setting mobility run: " << mobilityRun);
     RngSeedManager::SetRun(mobilityRun);  // 🔥 여기서만 변경
 
